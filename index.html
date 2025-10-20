@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>🧠 AI 뉴스 면접 대비 콘텐츠 생성기</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', sans-serif;
+      background: #f6f7fb;
+      margin: 0;
+      padding: 2rem;
+    }
+    h1 {
+      text-align: center;
+      color: #333;
+    }
+    .container {
+      max-width: 800px;
+      margin: 2rem auto;
+      background: white;
+      border-radius: 16px;
+      padding: 2rem;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+    input {
+      width: 100%;
+      padding: 1rem;
+      font-size: 1rem;
+      border: 1px solid #ccc;
+      border-radius: 8px;
+    }
+    button {
+      background-color: #4a90e2;
+      color: white;
+      border: none;
+      padding: 1rem 2rem;
+      border-radius: 8px;
+      margin-top: 1rem;
+      cursor: pointer;
+      font-weight: bold;
+    }
+    button:hover {
+      background-color: #357ab7;
+    }
+    pre {
+      white-space: pre-wrap;
+      word-break: keep-all;
+      background: #f9f9f9;
+      padding: 1rem;
+      border-radius: 8px;
+      border: 1px solid #eee;
+      line-height: 1.6;
+    }
+  </style>
+</head>
+<body>
+  <h1>🧠 AI 뉴스 면접 대비 콘텐츠 생성기</h1>
+  <div class="container">
+    <input type="text" id="urlInput" placeholder="뉴스 기사 URL을 입력하세요" />
+    <button id="generateBtn">콘텐츠 생성하기</button>
+    <pre id="output"></pre>
+  </div>
+
+  <script>
+    const btn = document.getElementById("generateBtn");
+    const output = document.getElementById("output");
+
+    btn.addEventListener("click", async () => {
+      const url = document.getElementById("urlInput").value.trim();
+      if (!url) {
+        alert("URL을 입력해주세요!");
+        return;
+      }
+      output.textContent = "⏳ AI가 분석 중입니다... 잠시만 기다려주세요.";
+
+      try {
+          const res = await fetch("/api/generate_news_content", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url })
+        });
+
+
+        if (!res.ok) {
+          throw new Error("서버 오류: " + res.status);
+        }
+
+        const data = await res.json();
+        output.textContent = data.content || "결과를 불러올 수 없습니다.";
+      } catch (err) {
+        output.textContent = "❌ 오류 발생: " + err.message;
+      }
+    });
+  </script>
+</body>
+</html>
