@@ -2,181 +2,192 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from openai import OpenAI
 from fastapi.middleware.cors import CORSMiddleware
-import requests
-from bs4 import BeautifulSoup
+from bson.objectid import ObjectId
+from bson.errors import InvalidId
+from pymongo import MongoClient
+from datetime import datetime
 import os, re, json
 from dotenv import load_dotenv
 
-# ✅ 환경 변수 로드 (.env에서 OPENAI_API_KEY 읽기)
+# ======================================
+# 환경 변수 로드
+# ======================================
 env_path = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(dotenv_path=env_path)
 
-app = FastAPI(title="AI News Quiz & Interview Content Generator")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+MONGODB_URI = os.getenv("MONGODB_URI")
 
-# ✅ OpenAI 클라이언트 초기화
-api_key = os.getenv("OPENAI_API_KEY")
-if not api_key:
-    raise ValueError("❌ OPENAI_API_KEY 환경변수가 없습니다. .env 파일을 확인하세요.")
-client = OpenAI(api_key=api_key)
-
-
-# ======================================
-# ✅ 1. 요청 데이터 모델 정의
-# ======================================
-class UrlRequest(BaseModel):
-    url: str
-
-
-class NewsRequest(BaseModel):
-    url: str
-
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY 누락!")
+if not MONGODB_URI:
+    raise ValueError("MONGODB_URI 누락!")
 
 # ======================================
-# ✅ 2. 공통: 뉴스 본문 크롤링 함수
+# OpenAI 클라이언트
 # ======================================
-def extract_article_text(url: str) -> str:
-    try:
-        res = requests.get(url, timeout=10)
-        res.raise_for_status()
-        soup = BeautifulSoup(res.text, "html.parser")
-
-        # article 태그 안의 <p> 우선
-        paragraphs = [p.get_text().strip() for p in soup.select("article p") if p.get_text().strip()]
-        if not paragraphs:
-            paragraphs = [p.get_text().strip() for p in soup.find_all("p") if p.get_text().strip()]
-
-        article = "\n".join(paragraphs)
-        if not article:
-            raise ValueError("본문을 찾을 수 없습니다.")
-        return article
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"크롤링 실패: {e}")
-
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ======================================
-# ✅ 3. 뉴스 요약 + 퀴즈 생성 API (기존 기능)
+# MongoDB 연결
 # ======================================
-@app.post("/analyze")
-def analyze_article(request: UrlRequest):
-    article = extract_article_text(request.url)
-
-    prompt = f"""
-다음 뉴스 기사를 바탕으로 JSON 형식으로 작성하세요.
-
-{{
-  "summary": "3~5문장 요약",
-  "keywords": ["키워드1", "키워드2", "키워드3", "키워드4", "키워드5"],
-  "quizzes": [
-    {{
-      "question": "질문",
-      "options": ["보기1", "보기2", "보기3", "보기4"],
-      "answer": "정답 보기",
-      "explanation": "해설"
-    }}
-  ]
-}}
-
-[기사 본문]
-{article[:5000]}
-"""
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-        )
-
-        raw_output = response.choices[0].message.content.strip()
-        match = re.search(r"\{[\s\S]*\}", raw_output)
-        if not match:
-            raise ValueError("모델 응답에서 JSON 구조를 찾을 수 없습니다.")
-
-        parsed = json.loads(match.group())
-
-        return {
-            "summary": parsed.get("summary"),
-            "keywords": parsed.get("keywords"),
-            "quizzes": parsed.get("quizzes"),
-            "result": None
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"AI 처리 실패: {e}")
-
+mongo_client = MongoClient(MONGODB_URI)
+db = mongo_client["OneBitArticle"]
+collection = db["Selected_Articles"]
 
 # ======================================
-# ✅ 4. 뉴스 기반 면접/학습 콘텐츠 생성 API (새 기능)
+# FastAPI 설정
 # ======================================
-@app.post("/generate_news_content")
-def generate_news_content(req: NewsRequest):
-    """
-    입력: 뉴스 기사 URL
-    출력: 핵심 요약, 키워드, 면접형 질문, 객관식 퀴즈 포함 콘텐츠
-    """
-    try:
-        # 📰 1. 기사 본문 크롤링
-        res = requests.get(req.url, timeout=10)
-        res.raise_for_status()
-        soup = BeautifulSoup(res.text, "html.parser")
-        article = "\n".join([p.get_text() for p in soup.select("article p")])
+app = FastAPI(title="AI News Generator")
 
-        if not article.strip():
-            raise ValueError("⚠️ 기사 본문을 찾을 수 없습니다. HTML 구조를 확인하세요.")
-
-        # 🧠 2. GPT 프롬프트 구성
-        prompt = f"""
-당신은 'AI 면접 대비용 뉴스 학습 콘텐츠 전문가'입니다.
-아래 뉴스 기사를 기반으로 다음 항목을 작성하세요.
-
----
-[1️⃣ 핵심 요약]
-- 기사 내용을 3~5문장으로 요약 (산업 트렌드 중심)
-
-[2️⃣ 주요 키워드 및 설명]
-- 핵심 키워드 5개: 정의, 산업 내 의미, 면접 활용 포인트 포함
-
-[3️⃣ PT형 면접 질문 5개]
-- 사고력 중심 질문으로 작성, 각 질문 뒤에 [면접 포인트] 포함
-
-[4️⃣ 객관식 퀴즈 5문항]
-- 보기 4개, 정답, 해설 포함
----
-
-[기사 본문]
-\"\"\"{article[:5000]}\"\"\"
-"""
-
-        # 🤖 3. OpenAI API 호출
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "너는 뉴스 기반 학습 콘텐츠를 생성하는 전문가야. 명확하고 깔끔하게 구조화해줘."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.7,
-        )
-
-        result_text = response.choices[0].message.content.strip()
-
-        return {
-            "url": req.url,
-            "content": result_text,
-            "result": "OK"
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"FastAPI 처리 실패: {e}")
-
-
-# ======================================
-# ✅ 5. CORS 설정
-# ======================================
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*"]
 )
+
+# ======================================
+# Request Model
+# ======================================
+class AnalyzeRequest(BaseModel):
+    article_id: str
+
+
+# ======================================
+# 🧩 GPT 처리 함수 (단일 기사 처리)
+# ======================================
+def generate_gpt_content(article_text: str):
+    prompt = f"""
+    다음 뉴스 내용을 기반으로 아래 요청을 수행해줘. 대상은 IT 직무 취업준비생이야.
+
+    summary: 기사에서 전달하는 핵심 내용을 빠짐없이 포함하되, IT 취업준비생에게 특히 중요한 기술 동향·시장 변화·기업 전략 등을 중심으로 요약해줘.
+
+    keywords: 기사 속에서 IT 취업준비생이 반드시 이해해야 하는 핵심 기술 개념 또는 최신 기술 트렌드를 10개 이내로 추출하고, 각 키워드는 신뢰할 수 있고 명확한 기술 설명을 붙여줘.
+
+    quizzes: 기사를 읽고 학습한 내용을 점검할 수 있도록, 기사 내용 기반의 4지선다형 퀴즈 5개를 생성해줘. 각 퀴즈는 질문, 보기 4개, 정답 1개, 정답과 오답에 대한 상세한 해설을 포함해야 해.
+
+    결과물은 반드시 아래 JSON 형식으로만 출력해야 하며, JSON 외의 추가 문장이나 설명은 절대 포함하면 안 돼.
+
+    형식:
+    {{
+        "summary": "",
+        "keywords": [
+            {{"keyword": "", "description": ""}}
+        ],
+        "quizzes": [
+            {{
+                "question": "",
+                "options": ["", "", "", ""],
+                "answer": "",
+                "explanation": ""
+            }}
+        ]
+    }}
+
+    뉴스 본문:
+    \"\"\"{article_text[:7000]}\"\"\"  # 7k token 제한
+    """
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.7
+    )
+
+    raw_output = response.choices[0].message.content.strip()
+
+    # JSON 추출
+    json_match = re.search(r"\{[\s\S]*\}", raw_output)
+    if not json_match:
+        raise HTTPException(status_code=500, detail="GPT JSON 파싱 실패")
+
+    return json.loads(json_match.group())
+
+
+# 단일 GPT 처리 API (기존)
+@app.post("/generate_gpt_result")
+def generate_gpt_result(req: AnalyzeRequest):
+
+    # ObjectId 검증
+    try:
+        oid = ObjectId(req.article_id)
+    except InvalidId:
+        raise HTTPException(status_code=400, detail="유효한 MongoDB ObjectId가 아닙니다.")
+
+    # 문서 조회
+    document = collection.find_one({"_id": oid})
+    if not document:
+        raise HTTPException(status_code=404, detail="해당 문서를 찾을 수 없습니다.")
+
+    # content_col 합치기
+    content_blocks = document.get("content_col", [])
+    flat_lines = []
+
+    for block in content_blocks:
+        for line in block:
+            if isinstance(line, str):
+                flat_lines.append(line.strip())
+
+    article_text = "\n".join(flat_lines)
+
+    if not article_text:
+        raise HTTPException(status_code=500, detail="content_col에서 본문을 추출할 수 없습니다.")
+
+    # GPT 호출
+    gpt_result = generate_gpt_content(article_text)
+
+    # MongoDB 저장
+    collection.update_one({"_id": oid}, {"$set": {"gpt_result": gpt_result}})
+
+    return {
+        "status": "OK",
+        "message": "GPT 결과 저장 완료",
+        "article_id": req.article_id,
+        "gpt_result": gpt_result
+    }
+
+
+# 자동 처리 API: 오늘 날짜 기사 5개 자동 GPT 처리
+@app.post("/generate_daily_gpt_results")
+def generate_daily_gpt_results():
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    # serving_date가 오늘인 문서 5개 찾기
+    articles = list(collection.find({"serving_date": today}).limit(5))
+
+    if not articles:
+        return {"message": f"오늘 날짜({today}) 기사 없음"}
+
+    updated_ids = []
+
+    for article in articles:
+        article_id = str(article["_id"])
+
+        # 본문 추출
+        content_blocks = article.get("content_col", [])
+        flat_lines = []
+
+        for block in content_blocks:
+            for line in block:
+                if isinstance(line, str):
+                    flat_lines.append(line.strip())
+
+        article_text = "\n".join(flat_lines)
+
+        # GPT 호출
+        gpt_result = generate_gpt_content(article_text)
+
+        # 저장
+        collection.update_one(
+            {"_id": ObjectId(article_id)},
+            {"$set": {"gpt_result": gpt_result}}
+        )
+
+        updated_ids.append(article_id)
+
+    return {
+        "status": "OK",
+        "message": f"{len(updated_ids)}개 기사 GPT 자동 처리 완료",
+        "processed_article_ids": updated_ids
+    }
